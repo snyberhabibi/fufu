@@ -1,8 +1,11 @@
 /**
- * Fufu - Claude Code Slack Bot
+ * Fufu v6 - Claude Code Slack Bot
  *
- * Full Claude Code parity via Slack. Each channel maps to a repo.
- * Voice notes, auto-accept, smart formatting.
+ * Behavior:
+ * - Every @mention creates a new thread
+ * - Default: normal mode (prompts for permissions, you reply y/n)
+ * - --auto flag: auto-accept all permissions
+ * - --dangerous flag: skip all permission prompts entirely
  */
 
 import { App, LogLevel } from '@slack/bolt';
@@ -18,7 +21,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..');
 config({ path: join(ROOT_DIR, '.env') });
 
-// Load channel config
 const CHANNEL_CONFIG = JSON.parse(
   readFileSync(join(ROOT_DIR, 'config', 'channels.json'), 'utf-8')
 );
@@ -59,6 +61,21 @@ async function removeReact(channel, ts, emoji) {
   try { await app.client.reactions.remove({ channel, timestamp: ts, name: emoji }); } catch {}
 }
 
+async function postMessage(channel, threadTs, text) {
+  try {
+    return await app.client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text,
+      unfurl_links: false,
+      mrkdwn: true
+    });
+  } catch (e) {
+    console.error('[!] Post failed:', e.message);
+    return null;
+  }
+}
+
 function shellEscape(str) {
   return "'" + str.replace(/'/g, "'\"'\"'") + "'";
 }
@@ -70,13 +87,19 @@ function tmuxExists(name) {
   } catch { return false; }
 }
 
+// Spawn Claude session
+// dangerous=true: --dangerously-skip-permissions (no prompts at all)
+// dangerous=false: normal mode (will prompt for edits/bash)
 async function spawnSession(sessionName, workingDir, dangerous = false) {
   try {
     execSync(`${TMUX} new-session -d -s ${shellEscape(sessionName)} -c ${shellEscape(workingDir)}`);
+
+    // Only use --dangerously-skip-permissions if explicitly requested
     const cmd = dangerous ? 'claude --dangerously-skip-permissions' : 'claude';
     execSync(`${TMUX} send-keys -t ${shellEscape(sessionName)} '${cmd}' Enter`);
+
     await waitReady(sessionName);
-    console.log(`[+] Session: ${sessionName}`);
+    console.log(`[+] Session: ${sessionName} (${dangerous ? 'dangerous' : 'normal'} mode)`);
     return true;
   } catch (e) {
     console.error(`[!] Spawn failed: ${e.message}`);
@@ -163,7 +186,9 @@ function hasPermissionPrompt(content) {
          lower.includes('do you want to') ||
          lower.includes('(y/n)') ||
          lower.includes('[y/n]') ||
-         lower.includes('approve');
+         lower.includes('approve') ||
+         lower.includes('allow once') ||
+         lower.includes('allow always');
 }
 
 function parseResponse(content, sessionName) {
@@ -202,7 +227,7 @@ function parseResponse(content, sessionName) {
     if (t === '>' || t === '> ') { responseEndIndex = i; break; }
   }
 
-  // Extract and format response
+  // Extract and format
   const responseLines = lines.slice(userPromptIndex + 1, responseEndIndex);
   const cleanedLines = [];
   let currentSection = null;
@@ -218,41 +243,32 @@ function parseResponse(content, sessionName) {
     if (t.includes('Share Claude Code')) continue;
     if (t.includes('Auto-update failed')) continue;
 
-    // Claude's response text
+    // Claude's response
     if (t.startsWith('⏺')) {
       const toolMatch = t.match(/^⏺\s+(\w+)\(([^)]*)\)/);
       if (toolMatch) {
         const [, tool, args] = toolMatch;
-        if (tool === 'Read') {
-          cleanedLines.push(`📖 Reading \`${args}\``);
-        } else if (tool === 'Edit') {
-          cleanedLines.push(`✏️ Editing \`${args.split(',')[0]}\``);
-        } else if (tool === 'Write') {
-          cleanedLines.push(`📝 Writing \`${args}\``);
-        } else if (tool === 'Bash') {
-          cleanedLines.push(`💻 Running command...`);
-        } else if (tool === 'Glob' || tool === 'Grep') {
-          cleanedLines.push(`🔍 Searching...`);
-        } else {
-          cleanedLines.push(`🔧 ${tool}...`);
-        }
+        if (tool === 'Read') cleanedLines.push(`📖 Reading \`${args}\``);
+        else if (tool === 'Edit') cleanedLines.push(`✏️ Editing \`${args.split(',')[0]}\``);
+        else if (tool === 'Write') cleanedLines.push(`📝 Writing \`${args}\``);
+        else if (tool === 'Bash') cleanedLines.push(`💻 Running command...`);
+        else if (tool === 'Glob' || tool === 'Grep') cleanedLines.push(`🔍 Searching...`);
+        else cleanedLines.push(`🔧 ${tool}...`);
         currentSection = tool;
         continue;
       }
-
       const text = t.replace(/^⏺\s*/, '');
       if (text) cleanedLines.push(text);
     }
     else if (t.startsWith('⎿')) {
       const text = t.replace(/^⎿\s*/, '');
-
       if (currentSection === 'Bash' && text) {
         if (text.length < 200) {
           cleanedLines.push('```');
           cleanedLines.push(text);
           cleanedLines.push('```');
         } else {
-          cleanedLines.push(`_(${text.length} chars of output)_`);
+          cleanedLines.push(`_(${text.length} chars)_`);
         }
       } else if (text && text.length < 100) {
         cleanedLines.push(`  ↳ ${text}`);
@@ -285,7 +301,8 @@ async function pollOutputs() {
 
     const current = capture(session.sessionName);
 
-    if (session.autoAccept && hasPermissionPrompt(current)) {
+    // Auto-accept if flag set (but NOT if dangerous mode - those don't prompt)
+    if (session.autoAccept && !session.dangerous && hasPermissionPrompt(current)) {
       sendKey(session.sessionName, 'y');
       console.log(`[Auto] Accepted: ${session.sessionName}`);
       continue;
@@ -298,17 +315,7 @@ async function pollOutputs() {
 
       const chunks = chunkText(response, 3800);
       for (const chunk of chunks) {
-        try {
-          await app.client.chat.postMessage({
-            channel: pending.channelId,
-            thread_ts: threadTs,
-            text: chunk,
-            unfurl_links: false,
-            mrkdwn: true
-          });
-        } catch (e) {
-          console.error('[!] Send failed:', e.message);
-        }
+        await postMessage(pending.channelId, threadTs, chunk);
         if (chunks.length > 1) await sleep(300);
       }
 
@@ -343,7 +350,7 @@ function chunkText(text, max) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Audio handling
+// Audio
 async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const file = createWriteStream(dest);
@@ -362,21 +369,22 @@ async function downloadFile(url, dest) {
 async function transcribe(filePath) {
   try {
     return execSync(
-      `claude -p "Transcribe this audio exactly. Output only the transcription, nothing else." --file ${shellEscape(filePath)}`,
+      `claude -p "Transcribe this audio exactly. Output only the transcription." --file ${shellEscape(filePath)}`,
       { encoding: 'utf-8', timeout: 60000 }
     ).trim();
   } catch { return null; }
 }
 
-// Poll every 800ms
 setInterval(pollOutputs, 800);
 
-// Handlers
+// Handle @mentions - ALWAYS create a thread
 app.event('app_mention', async ({ event }) => {
   const channelId = event.channel;
   const channelName = await getChannelName(channelId);
-  const threadTs = event.thread_ts || event.ts;
   const msgTs = event.ts;
+
+  // Always use message ts as thread - this creates a new thread for each mention
+  const threadTs = event.thread_ts || event.ts;
 
   if (!channelName || !CHANNEL_CONFIG[channelName]) {
     await react(channelId, msgTs, 'x');
@@ -407,8 +415,11 @@ app.event('app_mention', async ({ event }) => {
 
   if (!text) return;
 
+  // Parse flags
+  // --dangerous = skip ALL permission prompts (dangerous mode)
+  // --auto = auto-accept permissions (but still shows them briefly)
   const dangerous = text.includes('--dangerous') || text.includes('--yolo');
-  const autoAccept = dangerous || text.includes('--auto');
+  const autoAccept = text.includes('--auto');
   text = text.replace(/--(dangerous|yolo|auto)/gi, '').trim();
 
   await react(channelId, msgTs, 'brain');
@@ -419,6 +430,7 @@ app.event('app_mention', async ({ event }) => {
     const cfg = CHANNEL_CONFIG[channelName];
     const sessionName = `${cfg.prefix}-${Date.now().toString(36)}`;
 
+    // Only spawn with dangerous flag if explicitly requested
     const ok = await spawnSession(sessionName, cfg.workingDir, dangerous);
     if (!ok) {
       await removeReact(channelId, msgTs, 'brain');
@@ -426,16 +438,23 @@ app.event('app_mention', async ({ event }) => {
       return;
     }
 
-    session = { sessionName, channelId, autoAccept };
+    session = {
+      sessionName,
+      channelId,
+      autoAccept: autoAccept || dangerous, // dangerous mode implies auto-accept
+      dangerous
+    };
     sessions.set(threadTs, session);
   }
 
+  // Update flags if set on subsequent messages
   if (autoAccept) session.autoAccept = true;
 
   pendingResponses.set(session.sessionName, { channelId, threadTs, triggerTs: msgTs });
   sendText(session.sessionName, text);
 });
 
+// Handle thread replies
 app.message(async ({ message }) => {
   if ('bot_id' in message) return;
   if (!message.thread_ts) return;
@@ -448,6 +467,7 @@ app.message(async ({ message }) => {
 
   const lower = text.toLowerCase();
 
+  // Permission responses
   if (lower === 'y' || lower === 'yes') {
     sendKey(session.sessionName, 'y');
     await react(message.channel, message.ts, 'white_check_mark');
@@ -484,6 +504,12 @@ app.message(async ({ message }) => {
     }
   }
 
+  // Check for --auto flag in thread messages
+  if (text.includes('--auto')) {
+    session.autoAccept = true;
+    text = text.replace(/--auto/gi, '').trim();
+  }
+
   await react(message.channel, message.ts, 'brain');
 
   pendingResponses.set(session.sessionName, {
@@ -504,6 +530,11 @@ setInterval(() => {
 
 (async () => {
   await app.start();
-  console.log('Fufu running');
+  console.log('Fufu v6 running');
   console.log('Channels:', Object.keys(CHANNEL_CONFIG).join(', '));
+  console.log('');
+  console.log('Modes:');
+  console.log('  Default: normal (prompts for edit/bash, reply y/n)');
+  console.log('  --auto: auto-accept all permissions');
+  console.log('  --dangerous: skip all permission prompts');
 })();
