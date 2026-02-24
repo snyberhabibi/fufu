@@ -116,7 +116,8 @@ async function waitReady(sessionName, timeout = 60000) {
       const lines = out.split('\n').filter(l => l.trim());
       const last = lines[lines.length - 1]?.trim() || '';
 
-      if (last === '>' || last === '> ') {
+      // Check for empty prompt (both > and ❯ variants)
+      if (last === '>' || last === '> ' || last === '❯' || last === '❯ ') {
         stable++;
         if (stable >= 3) return true;
       } else {
@@ -173,9 +174,13 @@ function isThinking(content) {
   const lines = content.split('\n').slice(-30);
   for (const line of lines) {
     const t = line.trim();
-    if (t.startsWith('✽') || t.includes('Thinking') || t.includes('Sussing')) return true;
+    // Check for thinking indicators
+    if (t.startsWith('✽') || t.startsWith('·')) return true;
+    if (t.includes('Thinking') || t.includes('Sussing') || t.includes('Leavening')) return true;
     if (t.includes('Running…') || t.includes('Running...')) return true;
-    if (t.match(/^⏺\s+\w+\([^)]*\)$/) && !lines.some(l => l.trim().startsWith('⎿'))) return true;
+    if (t.includes('(thinking)')) return true;
+    // Tool call without result yet (both ⏺ and ● markers)
+    if (t.match(/^[⏺●]\s+\w+\([^)]*\)$/) && !lines.some(l => l.trim().startsWith('⎿'))) return true;
   }
   return false;
 }
@@ -202,17 +207,18 @@ function parseResponse(content, sessionName) {
     const t = lines[i].trim();
     if (t.startsWith('─') || t === '') continue;
     if (t.includes('|') && (t.includes('%') || t.includes('$'))) continue;
-    if (t === '>' || t === '> ') { hasEmptyPrompt = true; break; }
+    // Check both > and ❯ prompt variants
+    if (t === '>' || t === '> ' || t === '❯' || t === '❯ ') { hasEmptyPrompt = true; break; }
     if (t.length > 0) break;
   }
 
   if (!hasEmptyPrompt) return null;
 
-  // Find user prompt
+  // Find user prompt (both > and ❯ variants)
   let userPromptIndex = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     const t = lines[i].trim();
-    if (t.startsWith('> ') && t.length > 2 && !t.startsWith('> ─')) {
+    if ((t.startsWith('> ') || t.startsWith('❯ ')) && t.length > 2 && !t.startsWith('> ─') && !t.startsWith('❯ ─')) {
       userPromptIndex = i;
       break;
     }
@@ -220,11 +226,11 @@ function parseResponse(content, sessionName) {
 
   if (userPromptIndex === -1) return null;
 
-  // Find end of response
+  // Find end of response (both > and ❯ variants)
   let responseEndIndex = lines.length;
   for (let i = lines.length - 1; i > userPromptIndex; i--) {
     const t = lines[i].trim();
-    if (t === '>' || t === '> ') { responseEndIndex = i; break; }
+    if (t === '>' || t === '> ' || t === '❯' || t === '❯ ') { responseEndIndex = i; break; }
   }
 
   // Extract and format
@@ -238,14 +244,17 @@ function parseResponse(content, sessionName) {
     // Skip noise
     if (t === '' || t.startsWith('─')) continue;
     if (t.includes('|') && (t.includes('%') || t.includes('$'))) continue;
-    if (t.startsWith('●') || t.startsWith('○') || t.startsWith('✽')) continue;
+    // Skip thinking indicators (but NOT response markers)
+    if (t.startsWith('○') || t.startsWith('✽')) continue;
+    if (t.startsWith('·') && t.includes('…')) continue; // "Leavening…" etc
     if (t.includes('Claude Code v') || t.includes('Opus 4')) continue;
     if (t.includes('Share Claude Code')) continue;
     if (t.includes('Auto-update failed')) continue;
 
-    // Claude's response
-    if (t.startsWith('⏺')) {
-      const toolMatch = t.match(/^⏺\s+(\w+)\(([^)]*)\)/);
+    // Claude's response (both ⏺ and ● markers)
+    if (t.startsWith('⏺') || t.startsWith('●')) {
+      const marker = t.startsWith('⏺') ? '⏺' : '●';
+      const toolMatch = t.match(new RegExp(`^[${marker}]\\s+(\\w+)\\(([^)]*)\\)`));
       if (toolMatch) {
         const [, tool, args] = toolMatch;
         if (tool === 'Read') cleanedLines.push(`📖 Reading \`${args}\``);
@@ -253,11 +262,12 @@ function parseResponse(content, sessionName) {
         else if (tool === 'Write') cleanedLines.push(`📝 Writing \`${args}\``);
         else if (tool === 'Bash') cleanedLines.push(`💻 Running command...`);
         else if (tool === 'Glob' || tool === 'Grep') cleanedLines.push(`🔍 Searching...`);
+        else if (tool === 'Skill') cleanedLines.push(`🎯 Loading skill...`);
         else cleanedLines.push(`🔧 ${tool}...`);
         currentSection = tool;
         continue;
       }
-      const text = t.replace(/^⏺\s*/, '');
+      const text = t.replace(/^[⏺●]\s*/, '');
       if (text) cleanedLines.push(text);
     }
     else if (t.startsWith('⎿')) {
