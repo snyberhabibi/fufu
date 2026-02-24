@@ -1,0 +1,22 @@
+{
+  "fufu-marketing": {
+    "workingDir": "/home/ubuntu/yalla/yalla-bites-marketing",
+    "prefix": "mkt"
+  },
+  "fufu-apply": {
+    "workingDir": "/home/ubuntu/yalla/yalla-bites-apply",
+    "prefix": "app"
+  },
+  "fufu-novu": {
+    "workingDir": "/home/ubuntu/yalla/yalla-bites-novu",
+    "prefix": "novu"
+  },
+  "fufu-hunter": {
+    "workingDir": "/home/ubuntu/yalla/yalla-bites-hunter",
+    "prefix": "hunt"
+  },
+  "fufu-master": {
+    "workingDir": "/home/ubuntu/yalla",
+    "prefix": "main"
+  }
+}
