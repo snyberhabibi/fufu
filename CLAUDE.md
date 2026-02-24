@@ -1,22 +1,25 @@
 # Fufu - Claude Code Slack Bot
 
-You are working on **Fufu** — a Slack bot that runs Claude Code CLI in the cloud via tmux sessions.
+You are working on **Fufu v7 (Beast Mode)** — a Slack bot that runs Claude Code CLI in the cloud via tmux sessions.
 
 ---
 
 ## PROJECT OVERVIEW
 
 **Repository:** `snyberhabibi/fufu`
-**Purpose:** Run Claude Code in the cloud, controlled via Slack
-**Tech Stack:** Node.js + @slack/bolt + tmux + Claude Code CLI
+**Purpose:** Run Claude Code in the cloud, controlled via Slack with full API parity
+**Tech Stack:** Node.js + @slack/bolt + tmux + Claude Code CLI + AWS Secrets Manager
 
 ### Architecture
 ```
 Slack @mention → Fufu Bot → tmux Session → Claude Code CLI
-                                ↓
-                    Parse & format response
-                                ↓
-                    Post to Slack thread
+                     ↓
+            Interactive Quick Actions
+            Executive Dashboard (fufu-master)
+                     ↓
+            Parse & format response
+                     ↓
+            Post to Slack thread
 ```
 
 ---
@@ -25,30 +28,49 @@ Slack @mention → Fufu Bot → tmux Session → Claude Code CLI
 
 | File | Purpose |
 |------|---------|
-| `src/bot.js` | Main bot logic (v6) |
+| `src/bot.js` | Main bot logic (v7 Beast Mode) |
+| `src/secrets.js` | AWS Secrets Manager integration |
 | `config/channels.json` | Channel → repo mapping |
+| `scripts/vault-secrets.js` | Vault .env to AWS |
 | `ecosystem.config.cjs` | PM2 process config |
-| `scripts/setup.sh` | EC2 setup script |
-| `.env` | Slack tokens (not committed) |
+| `docs/EC2_SETUP.md` | Full EC2 setup guide |
 
 ---
 
 ## CHANNEL CONFIGURATION
 
-Edit `config/channels.json` to map Slack channels to repos:
+All 5 channels are pre-configured in `config/channels.json`:
 
-```json
-{
-  "fufu-marketing": {
-    "workingDir": "/home/ubuntu/yalla/yalla-bites-marketing",
-    "prefix": "mkt"
-  },
-  "fufu-apply": {
-    "workingDir": "/home/ubuntu/yalla/yalla-bites-apply",
-    "prefix": "app"
-  }
-}
-```
+| Channel | Repo | Prefix |
+|---------|------|--------|
+| `fufu-apply` | yalla-bites-apply | app |
+| `fufu-marketing` | yalla-bites-marketing | mkt |
+| `fufu-novu` | yalla-bites-novu | novu |
+| `fufu-hunter` | yalla-bites-hunter | hunt |
+| `fufu-master` | yalla (all repos) | main |
+
+---
+
+## INTERACTIVE QUICK ACTIONS
+
+When you @mention Fufu with no text, it shows quick action buttons:
+
+### Per-Channel Actions
+- **Git Status** - Check current git state
+- **Run Tests** - Execute test suite
+- **Build** - Run build process
+- **Deploy** - Deploy to Vercel/production
+
+### fufu-master Executive Actions
+- **All Repos Status** - Git status across all repos
+- **Recent Activity** - Last 5 commits per repo
+- **Deployments** - Vercel deployment status
+- **Cleanup Sessions** - Kill stale tmux sessions
+
+### Mode Selection Buttons
+- **Normal Mode** - Prompts for permissions (y/n)
+- **Auto Mode** - Auto-accepts all permissions
+- **Dangerous Mode** - Bypasses all prompts
 
 ---
 
@@ -69,21 +91,60 @@ Edit `config/channels.json` to map Slack channels to repos:
 
 ---
 
+## AWS SECRETS MANAGER
+
+All API keys are stored securely in AWS Secrets Manager.
+
+### Vault Your Secrets
+```bash
+# Set AWS credentials
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
+
+# Run vault script
+node scripts/vault-secrets.js
+```
+
+### Supported Secrets
+- Slack tokens
+- Anthropic API key
+- Supabase credentials
+- Novu API keys
+- Stripe keys
+- Vercel token
+- GitHub token
+- Resend API key
+- Cloudflare credentials
+- And more...
+
+---
+
 ## BOT FEATURES
 
 ### Core
 - **Thread-based sessions** - Each @mention creates a new thread/session
 - **Voice notes** - Transcribes audio messages via Claude
-- **Permission handling** - Y/N responses in thread
+- **Permission handling** - Y/N responses or button clicks
 - **Smart output parsing** - Formats Claude responses for Slack
+- **Interactive modals** - Quick action buttons
+
+### v7 Enhancements
+- **Executive Dashboard** - fufu-master monitors all activity
+- **AWS Secrets Manager** - Secure credential storage
+- **Session TTL** - Auto-cleanup after 30 minutes idle
+- **Graceful Shutdown** - Clean session termination
+- **Memory Leak Prevention** - Proper Map cleanup
 
 ### Output Formatting
 | Claude Output | Slack Display |
 |---------------|---------------|
 | `⏺ Read(file.ts)` | `📖 Reading \`file.ts\`` |
 | `⏺ Edit(file.ts)` | `✏️ Editing \`file.ts\`` |
+| `⏺ Write(file.ts)` | `📝 Writing \`file.ts\`` |
 | `⏺ Bash(...)` | `💻 Running command...` |
 | `⏺ Grep/Glob` | `🔍 Searching...` |
+| `⏺ Task(...)` | `🤖 Spawning agent...` |
 
 ### Thread Commands
 | Command | Action |
@@ -91,6 +152,7 @@ Edit `config/channels.json` to map Slack channels to repos:
 | `y` / `yes` | Accept permission |
 | `n` / `no` | Reject permission |
 | `end` | Kill session |
+| `--auto` | Enable auto-accept |
 
 ---
 
@@ -100,6 +162,7 @@ Edit `config/channels.json` to map Slack channels to repos:
 - Node.js 22+
 - tmux
 - Claude Code CLI (`npm install -g @anthropic-ai/claude-code`)
+- AWS CLI (optional, for Secrets Manager)
 
 ### Setup
 ```bash
@@ -110,7 +173,7 @@ npm install
 cp .env.example .env
 # Add SLACK_BOT_TOKEN and SLACK_APP_TOKEN
 
-# Run locally (for testing)
+# Run locally
 node src/bot.js
 ```
 
@@ -130,53 +193,15 @@ pm2 logs fufu
 
 ## DEPLOYMENT (EC2)
 
+See `docs/EC2_SETUP.md` for complete guide.
+
 ### Quick Deploy
 ```bash
-# SSH to server
 ssh ubuntu@<ec2-ip>
-
-# Pull latest
 cd ~/yalla/fufu
 git pull origin main
-
-# Restart
+npm install
 pm2 restart fufu
-```
-
-### Full Setup
-```bash
-# Run setup script
-./scripts/setup.sh
-
-# Trust repos in Claude
-cat >> ~/.claude/settings.json << 'EOF'
-{
-  "trustedPaths": [
-    "/home/ubuntu/yalla",
-    "/home/ubuntu/yalla/yalla-bites-marketing",
-    "/home/ubuntu/yalla/yalla-bites-apply",
-    "/home/ubuntu/yalla/yalla-bites-novu",
-    "/home/ubuntu/yalla/yalla-bites-hunter"
-  ]
-}
-EOF
-
-# Start with PM2
-pm2 start ecosystem.config.cjs
-pm2 save
-pm2 startup
-```
-
----
-
-## ENVIRONMENT VARIABLES
-
-```bash
-# Slack Bot Token (xoxb-...)
-SLACK_BOT_TOKEN=
-
-# Slack App Token for Socket Mode (xapp-...)
-SLACK_APP_TOKEN=
 ```
 
 ---
@@ -196,27 +221,9 @@ SLACK_APP_TOKEN=
 4. **Event Subscriptions** → Subscribe to:
    - `app_mention`
    - `message.channels`
-5. Install to workspace
-6. Invite `@Fufu` to channels
-
----
-
-## GIT WORKFLOW
-
-```bash
-# Feature branch
-git checkout -b feature/your-feature
-
-# Commit
-git add -A
-git commit -m "feat: description
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
-
-# Push and deploy
-git push origin feature/your-feature
-# Then: merge to main, pull on EC2, pm2 restart
-```
+5. **Interactivity** → Enable (required for buttons)
+6. Install to workspace
+7. Invite `@Fufu` to all fufu-* channels
 
 ---
 
@@ -224,22 +231,22 @@ git push origin feature/your-feature
 
 ### Bot not responding
 1. Check PM2: `pm2 status fufu`
-2. Check logs: `pm2 logs fufu`
-3. Verify Slack tokens in `.env`
+2. Check logs: `pm2 logs fufu --lines 50`
+3. Verify Slack tokens: `echo $SLACK_BOT_TOKEN`
 
 ### Session stuck
 1. List sessions: `tmux list-sessions`
-2. Kill stuck session: `tmux kill-session -t <name>`
-3. Or send `end` in Slack thread
+2. Kill: `tmux kill-session -t <name>`
+3. Or in Slack: reply `end` in thread
 
-### Permission prompt not showing
-- Default mode requires y/n in thread
-- Use `--auto` for auto-accept
-- Use `--dangerous` to skip entirely
+### Secrets not loading
+```bash
+aws secretsmanager get-secret-value --secret-id fufu/production
+```
 
-### Voice note not transcribing
-- Check file format (mp4/m4a supported)
-- Verify Claude CLI can access audio: `claude -p "test" --file audio.m4a`
+### Quick actions not showing
+- Ensure Interactivity is enabled in Slack app settings
+- Check channel is in `config/channels.json`
 
 ---
 
@@ -252,13 +259,13 @@ pm2 monit
 # Session list
 tmux list-sessions
 
-# Bot status
-pm2 status
-
 # Real-time logs
 pm2 logs fufu --lines 100
+
+# Executive dashboard
+# @Fufu in #fufu-master (shows all sessions)
 ```
 
 ---
 
-*Fufu v6 — Claude Code in the Cloud*
+*Fufu v7 — Beast Mode — Claude Code in the Cloud*

@@ -9,6 +9,7 @@
     "dev": "node --watch src/bot.js"
   },
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.750.0",
     "@slack/bolt": "^4.1.0",
     "dotenv": "^16.4.7"
   },
